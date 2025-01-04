@@ -1,0 +1,24 @@
+﻿@inherits LayoutComponentBase
+
+<BootstrapBlazorRoot>
+    <Layout ShowGotoTop="true" ShowCollapseBar="true" ShowFooter="@ShowFooter" SideWidth="0"
+            IsPage="true" IsFullSide="@IsFullSide" IsFixedHeader="@IsFixedHeader" IsFixedFooter="@IsFixedFooter"
+            TabDefaultUrl="/" UseTabSet="@UseTabSet" IsFixedTabHeader="IsFixedTabHeader" AdditionalAssemblies="new[] { GetType().Assembly }"
+            class="@Theme">
+        <Main>
+            <CascadingValue Value="this" IsFixed="true">
+                @Body
+            </CascadingValue>
+        </Main>
+        <NotFound>
+            <p>Sorry, there's nothing at this address.</p>
+        </NotFound>
+    </Layout>
+
+</BootstrapBlazorRoot>
+
+<div id="blazor-error-ui">
+    An unhandled error has occurred.
+    <a href="" class="reload">Reload</a>
+    <a class="dismiss">🗙</a>
+</div>

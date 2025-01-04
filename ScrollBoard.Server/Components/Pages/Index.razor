@@ -1,0 +1,360 @@
+﻿@page "/"
+@using System.Text.Json
+@using System.Text.Json.Serialization
+@using System.Text.RegularExpressions
+@using ScrollBoard.Server.Handles
+@inject IWebHostEnvironment Env
+@inject IJSRuntime JsRuntime
+<style>
+    table {
+        width: 100%;
+        table-layout: fixed;
+    }
+
+    th {
+        position: sticky;
+        top: 0; /* 固定在顶部 */
+        z-index: @int.MaxValue; /* 保证表头位于内容之上 */
+        outline: 1px solid black;
+    }
+
+    th, td {
+        padding: 10px;
+        text-align: left;
+        border: 1px solid #ddd;
+        text-align: center;
+        vertical-align: middle;
+    }
+
+    .rounded-rectangle {
+        border-radius: 10px; /* 圆角半径 */
+        text-align: center; /* 文字水平居中 */
+        padding: 10px; /* 内边距 */
+        display: flex; /* 启用 flexbox 布局 */
+        justify-content: center; /* 水平居中 */
+        align-items: center; /* 垂直居中 */
+        width: 70%; /* 自动宽度，依据内容 */
+        height: auto; /* 自动高度，依据内容 */
+        margin: auto; /* 水平垂直居中 */
+    }
+
+    .highlight {
+        outline: 2px solid blue; /* 使用outline避免覆盖问题 */
+        box-shadow: 0 0 10px blue; /* 可选的蓝色发光效果 */
+        transition: background-color 0.3s ease, box-shadow 0.3s ease; /* 平滑过渡 */
+    }
+
+</style>
+<link href="css/style.css" rel="stylesheet" />
+<table class="table table-bordered">
+    <thead>
+        <tr>
+            <th>总排名</th>
+            <th>队伍名</th>
+            <th>总得分</th>
+            <th>过题数</th>
+            <th>总用时</th>
+            @for (var i = 0; i < _board?.Pids.Count(); ++i)
+            {
+                var id = (char)('A' + i);
+                <th>@id</th>
+            }
+        </tr>
+    </thead>
+    <tbody>
+        @if (_board != null)
+        {
+            @foreach (var item in _board?.Teams.Select((value, index) => new { value, index })!)
+            {
+                var team = item.value;
+                var index = item.index;
+                var color = GetColorForRank(team.CurrentRank);
+                <tr id="@(index == _board.Current ? "CurrentSelect" : "")"
+                    class="@((index == _board.Current ? "highlight " : " ") + _animation)"
+                    style="--target-offset:@(GetScrollOffset(team.CurrentRank, index)); z-index:@(GetZIndex(team.CurrentRank))">
+                    <td style="background-color: @color">@(index + 1)</td>
+                    <td style="background-color: @color">@team.Uname</td>
+                    <td style="background-color: @color">@team.TotalScore</td>
+                    <td style="background-color: @color">@team.Solved</td>
+                    <td style="background-color: @color">@(team.TotalUsedTime / 60)</td>
+                    @foreach (var pid in _board.Pids)
+                    {
+                        var left = team.LeftMap.GetValueOrDefault(pid, 0);
+                        var score = team.ScoreMap.GetValueOrDefault(pid, -1);
+                        <td style="background-color: @color">
+                            @if (left > 0)
+                            {
+                                var infoStr = $"{(score > 0 ? score.ToString() : "")} + {team.LeftMap[pid]}";
+                                @if (!string.IsNullOrEmpty(infoStr))
+                                {
+                                    <div class=@GetFlashClass(index, pid) style="background-color: orange">
+                                        @infoStr
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                var isAccepted = team.IsAcceptedMap.GetValueOrDefault(pid, false);
+                                @if (score != -1)
+                                {
+                                    <div class="rounded-rectangle" style="background-color: @(isAccepted ? "lightgreen" : "red")">
+                                        @score
+                                    </div>
+                                }
+                            }
+                        </td>
+                    }
+                </tr>
+            }
+        }
+    </tbody>
+</table>
+
+@code {
+    private const string SubmissionsJsonFile = "submission.json";
+    private const string BoardInfoJsonFile = "boardInfo.json";
+    private const string BoardDataFolder = "BoardData";
+
+    private Board? _board;
+    private int _judgingPid = -1;
+    private int _scrollingRank = -1;
+    private int _scrollingIndex = -1;
+    private bool _isScrollDown;
+    private int _scrollingDistance;
+    private string _animation = "";
+
+    private string GetZIndex(int rank) => rank == _scrollingRank ? "2" : "1";
+
+    private string GetScrollOffset(int rank, int index)
+    {
+        if (_board == null || _scrollingRank == -1)
+            return "0%";
+        switch (_isScrollDown)
+        {
+            case false when rank < _scrollingRank:
+            case true when rank > _scrollingRank:
+            case false when _scrollingIndex < index:
+            case true when _scrollingIndex > index:
+                return "0%";
+            default:
+                {
+                    var distance = rank == _scrollingRank ? -_scrollingDistance * 100 : 100;
+                    return $"{(_isScrollDown ? -distance : distance)}%";
+                }
+        }
+    }
+
+    private string GetFlashClass(int index, int pid)
+    {
+        if (_board == null || !(index == _board.Current && pid == _judgingPid))
+            return "rounded-rectangle";
+        return "rounded-rectangle flash";
+    }
+
+    private string GetColorForRank(int rank)
+    {
+        if (_board == null)
+            return "white";
+        if (rank <= _board!.Gold)
+            return "#fef9c6";
+        rank -= _board!.Gold;
+        if (rank <= _board!.Silver)
+            return "silver";
+        rank -= _board!.Silver;
+        return rank <= _board!.Bronze ? "bisque" : "white";
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        var info = await LoadBoardInfoFromFileAsync();
+        var teams = await LoadTeamsFromFileAsync();
+        _board = new Board(info, teams);
+    }
+
+    private async Task<BoardInfo> LoadBoardInfoFromFileAsync()
+    {
+        var boardInfo = await ReadBoardInfoFromFileAsync(
+            Path.Combine(Path.Combine(Env.ContentRootPath, BoardDataFolder), BoardInfoJsonFile));
+        return boardInfo ?? new BoardInfo();
+    }
+
+    private static async Task<BoardInfo?> ReadBoardInfoFromFileAsync(string filePath)
+    {
+        if (!File.Exists(filePath))
+            return null;
+        var json = await File.ReadAllTextAsync(filePath);
+        json = Regex.Replace(json, """new NumberInt\("(\d+)"\)""", "$1");
+        var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                Converters = { new BoardInfoDateTimeConverter() }
+            };
+        return JsonSerializer.Deserialize<BoardInfo>(json, options);
+    }
+
+    private async Task<List<Team>> LoadTeamsFromFileAsync()
+    {
+        var submissions = await ReadSubmissionsFromFileAsync(
+            Path.Combine(Path.Combine(Env.ContentRootPath, BoardDataFolder), SubmissionsJsonFile));
+        if (submissions == null)
+            return [];
+        Dictionary<int, Team> teamMap = new();
+        foreach (var submission in submissions)
+        {
+            if (!teamMap.ContainsKey(submission.Uid))
+            {
+                var team = new Team
+                    {
+                        Uname = submission.Uname,
+                        Uid = submission.Uid,
+                    };
+                teamMap.Add(submission.Uid, team);
+            }
+
+            if (!teamMap[submission.Uid].SubmissionsMap.ContainsKey(submission.Pid))
+                teamMap[submission.Uid].SubmissionsMap[submission.Pid] = [];
+            teamMap[submission.Uid].SubmissionsMap[submission.Pid].Add(submission);
+        }
+        return teamMap.Select(x => x.Value).ToList();
+    }
+
+    private static async Task<List<Submission>?> ReadSubmissionsFromFileAsync(string filePath)
+    {
+        if (!File.Exists(filePath))
+            return null;
+        await using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+        var options = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,  // 如果 JSON 的字段名是 camelCase（judgeAt、pid等）
+                Converters = { new JsonStringEnumConverter(), new MongoDateConverter() } // 如果有枚举，需要确保它能正确映射
+            };
+        var submissions = await JsonSerializer.DeserializeAsync<List<Submission>>(fileStream, options);
+        return submissions;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await JsRuntime.InvokeVoidAsync("bodyKeyDownListener", DotNetObjectReference.Create(this));
+        }
+    }
+
+    // 播放闪一闪动画
+    private async Task PlayFlashAnimationAsync(int pid)
+    {
+        _judgingPid = pid; // 记录当前评测的题目
+        StateHasChanged(); // 闪一闪
+        await Task.Delay(2000); // 防止动画播放时做别的
+        _board!.JudgeCurrentTeam(pid);
+        _judgingPid = -1; // 评测结束
+        StateHasChanged(); // 出结果
+        await Task.Delay(50); // 让他渲染一下下
+    }
+
+    // 播放滚板动画
+    private async Task PlayScrollAnimationAsync()
+    {
+        var last = _board!.Current;
+        var uid = _board.Teams[_board.Current].Uid; // 记录当前
+        var backup = new List<Team>(_board.Teams);
+        _board.UpdateTeamRank();
+        var scrollingIndex = _board.Teams.FindIndex(team => team.Uid == uid);
+        if (scrollingIndex == last)
+        {
+            StateHasChanged();
+            return;
+        }
+
+        _scrollingRank = _board.Teams[scrollingIndex].CurrentRank;
+        _scrollingDistance = int.Abs(last - scrollingIndex);
+
+        var mergedList = backup.Select(team1 =>
+        {
+            var team3 = team1;
+            var team2 = _board.Teams.FirstOrDefault(t => t.Uid == team3.Uid);
+            if (team2 == null) return team1;
+            // 合并操作，这里可以自定义合并的规则
+            team1 = team2;
+            return team1;
+        }).ToList();
+        backup = _board.Teams;
+        _board.Teams = mergedList;
+        _isScrollDown = scrollingIndex > last;
+        _animation = "scroll";
+        _scrollingIndex = last;
+        StateHasChanged();
+        await Task.Delay(2000); // 防止动画播放时做别的
+        _board.Teams = backup;
+        _animation = "";
+        _scrollingRank = -1;
+        _scrollingIndex = -1;
+        _scrollingDistance = 0;
+        StateHasChanged();
+        await Task.Delay(50); // 让他渲染一下下
+    }
+
+    // 播放追踪光标动画
+    private async Task ScrollToElementAsync()
+    {
+        await JsRuntime.InvokeVoidAsync("scrollToElement", "CurrentSelect");
+    }
+
+    private bool _isPressedEnter;
+
+    private async Task PressEnterAsync()
+    {
+        await ScrollToElementAsync();
+        var (pid, waitForJudgeCounter) = _board!.FindCurrentWaitForJudge();
+        if (waitForJudgeCounter == 0)
+        {
+            _board.Current -= _board.Current != 0 ? 1 : 0;
+            StateHasChanged();
+            _isPressedEnter = false;
+            return;
+        }
+        await PlayFlashAnimationAsync(pid);
+        await PlayScrollAnimationAsync();
+
+        _ = _board.FindCurrentWaitForJudge();
+        StateHasChanged();
+    }
+
+    private void PressBackspace()
+    {
+        _board!.ScrollToEnd();
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async void HandleKeyDown(string key, int keyCode)
+    {
+        if (_board == null || _isPressedEnter)
+            return;
+        _isPressedEnter = true;
+        switch (key)
+        {
+            case "Enter":
+                await PressEnterAsync();
+                break;
+            case "Backspace":
+                PressBackspace();
+                break;
+        }
+        _isPressedEnter = false;
+    }
+}
+
+<script>
+    window.bodyKeyDownListener = (dotNetHelper) => {
+        document.body.addEventListener('keydown', (event) => {
+            dotNetHelper.invokeMethodAsync('HandleKeyDown', event.key, event.keyCode);
+        });
+    };
+    function scrollToElement(elementId) {
+        const element = document.getElementById(elementId);
+        if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+</script>
